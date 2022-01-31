@@ -53,7 +53,7 @@ ndt.create_map(reference_pc)
 # create scan point cloud
 euler = np.array([ 0.1, 0, 0.0])
 rot = Rotation.from_euler('zyx', euler, degrees=True)
-trans = np.array([ -0.3, 0.0, 0.0])
+trans = np.array([ -1.0, 2.0, 0.0])
 scan_pc = np.apply_along_axis(lambda x: rot.apply(x) + trans, 1, reference_pc).astype(np.float32)
 
 # Run registration and get result transform.

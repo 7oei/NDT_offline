@@ -33,6 +33,7 @@ using namespace Eigen;
 
 using TransformT = Matrix<double, 6, 1>;
 using JacobianT = TransformT;
+using JacobianTT = Matrix<double, 1, 6>;
 using HessianT = Matrix<double, 6, 6>;
 using JacobianCoefficientsT = Matrix<double, 8, 3>;
 using HessianCoefficientsT = Matrix<double, 18, 3>;
@@ -469,6 +470,34 @@ tuple<double, JacobianT, HessianT> computeDerivative
   return make_tuple(score, jacobian, hessian);
 }
 
+double computeScore
+(const ScoreParams &param,const PointT &mean,
+ pcl::PointCloud<pcl::PointXYZ>::Ptr cloud, const CovarianceMatrixT &cov_inv){
+  double score = 0;
+  //点ループ
+  for (unsigned int point_id = 0; point_id < cloud->points.size(); point_id++){
+    //点の型変換
+    PointT point;
+    point << cloud->points[point_id].x,cloud->points[point_id].y,cloud->points[point_id].z;
+    
+    // CovarianceMatrixT cov = MatrixXd::Identity(3, 3);
+    // CovarianceMatrixT cov_inv;
+    // bool exists;
+    // double det = 0;
+    // cov.computeInverseAndDetWithCheck(cov_inv,det,exists);
+    // if(!exists) continue;
+
+    PointT x_k_dash = point - mean;
+    //マッチ毎にscore,jacobian,hessianの計算
+    PointTT xkd_T_conv_inv =  x_k_dash.transpose() * cov_inv;
+    double xkd_T_conv_inv_xkd = x_k_dash.dot(xkd_T_conv_inv);
+    double exp_term = exp(-param.d(2) / 2 * xkd_T_conv_inv_xkd);
+    score += -param.d(1) * exp_term;
+  }
+
+  return score;
+ }
+
 void angleDerivatives(TransformT & tf,JacobianCoefficientsT & jacobian_coefficients,HessianCoefficientsT & hessian_coefficients){
   double cx, cy, cz, sx, sy, sz;
   // if (fabs(tf(3)) < 10e-5) {
@@ -582,6 +611,7 @@ TransformT Align(TransformT init_trans, pcl::PointCloud<pcl::PointXYZ>::Ptr clou
   tf = init_trans;
   ScoreParams gauss_params(output_prob, leaf_size);
   while(!converged){
+    cout << "iterations(" << iterations << ") start !!" << endl;
     //このイテレーションのscore,jacobian,hessianの定義
     double iter_score = 0;
     JacobianT iter_jacobian = JacobianT::Zero();
@@ -592,7 +622,16 @@ TransformT Align(TransformT init_trans, pcl::PointCloud<pcl::PointXYZ>::Ptr clou
     JacobianCoefficientsT jacobian_coefficients;
     HessianCoefficientsT hessian_coefficients;
     angleDerivatives(tf,jacobian_coefficients,hessian_coefficients);
+    PointT mean;
+    mean << 0, 0, 0;
+    CovarianceMatrixT cov = MatrixXd::Identity(3, 3);
 
+    CovarianceMatrixT cov_inv;
+    bool exists;
+    double det = 0;
+    cov.computeInverseAndDetWithCheck(cov_inv,det,exists);
+
+    if(!exists) continue;
     //点ループ
     for (unsigned int point_id = 0; point_id < tf_cloud.points.size(); point_id++){
       //点の型変換
@@ -621,16 +660,6 @@ TransformT Align(TransformT init_trans, pcl::PointCloud<pcl::PointXYZ>::Ptr clou
       //             neighbor_iter->second.params[4], neighbor_iter->second.params[5], neighbor_iter->second.params[2];
 
       // PointT mean = MatrixXd::Zero(3, 1);
-      PointT mean;
-      mean << 0, 0, 0;
-      CovarianceMatrixT cov = MatrixXd::Identity(3, 3);
-
-      CovarianceMatrixT cov_inv;
-      bool exists;
-      double det = 0;
-      cov.computeInverseAndDetWithCheck(cov_inv,det,exists);
-
-      if(!exists) continue;
       PointT x_k_dash = point - mean;
       //マッチ毎にscore,jacobian,hessianの計算
 
@@ -651,8 +680,29 @@ TransformT Align(TransformT init_trans, pcl::PointCloud<pcl::PointXYZ>::Ptr clou
 
     //ニュートン方第2項(update)の計算
     HessianT iter_hessian_inv = iter_hessian.completeOrthogonalDecomposition().pseudoInverse();;
-    update = iter_hessian_inv * iter_jacobian;
-    update_norm = update.norm();
+    // update = iter_hessian_inv * iter_jacobian;
+    // update_norm = update.norm();
+
+    double alpha = 1;
+    double xi = 0.001;
+    double tau = 0.9;
+    int line_iter_num = 0;
+    while(1){
+      pcl::PointCloud<pcl::PointXYZ>::Ptr line_search_tf_cloud {new pcl::PointCloud<pcl::PointXYZ>};
+      *line_search_tf_cloud = TransformPointCloud(cloud,tf + alpha * iter_jacobian);
+      double next_score = computeScore(gauss_params, mean, line_search_tf_cloud, cov_inv);
+      JacobianTT iter_jacobian_t = iter_jacobian.transpose();
+      double iter_jacobian_norm = iter_jacobian_t * iter_jacobian;
+      double armijo_score = iter_score + xi * alpha * iter_jacobian_norm;
+      if(next_score > armijo_score) alpha *= tau;
+      else break; 
+      line_iter_num ++;
+      if(line_iter_num > 1000) break;
+    }
+    cout << "alpha = " << alpha << endl;
+
+    update_norm = alpha;
+    update = -alpha * iter_jacobian;
 
 #ifdef DEBUG
     jacobian_vector_sum.push_back(iter_jacobian);
@@ -663,6 +713,12 @@ TransformT Align(TransformT init_trans, pcl::PointCloud<pcl::PointXYZ>::Ptr clou
     tf -= update;
     if(iterations >= max_iterations || update_norm < transformation_epsilon)
       converged = true;
+    if(iterations >= max_iterations ){
+        cout << "end : max iteration" << endl;
+    } 
+    if(std::fabs(update_norm) < transformation_epsilon){
+        cout << "end : converged" << endl;
+    }
     iterations++;
   }
   return tf;
